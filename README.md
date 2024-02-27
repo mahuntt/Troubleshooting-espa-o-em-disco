@@ -1,1 +1,1 @@
-#Scripts utilizados para realizar uma análise de espaço em disco
+Scripts utilizados para realizar uma análise de espaço em disco
