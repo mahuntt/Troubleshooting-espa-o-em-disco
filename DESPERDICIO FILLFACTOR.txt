@@ -1,0 +1,105 @@
+USE MASTER
+GO
+if object_id('tempdb..#UnusedSpaceByFillfactor') is not null drop table #UnusedSpaceByFillfactor
+CREATE TABLE #UnusedSpaceByFillfactor
+(
+	DB varchar(100),
+	[schemaNm] varchar(100),
+	[TableName] [sysname] NOT NULL,
+	[IndexName] [sysname] NULL,
+	[fill_factor] [int] NOT NULL,
+	[RowCount] [bigint] NULL,
+	[total_pages] [bigint] NOT NULL,
+	[used_pages] [bigint] NOT NULL,
+	[media_linhas_pag] [decimal](32, 2) NULL,
+	[TotalSpaceKB] [bigint] NULL,
+	[UsedSpaceKB] [bigint] NULL,
+	[UnusedSpaceKB] [bigint] NULL,
+	[Uso Fillfactor 100 MB] [decimal](32, 2) NULL,
+	[Desperdicio devido ao Fill Factor MB] [decimal](32, 2) NOT NULL
+) 
+
+EXEC SP_MSFOREACHDB N'
+
+use [?]
+
+;WITH cte
+AS
+(
+SELECT DB_NAME() AS Database_Name
+, sc.name AS Schema_Name
+, o.name AS Table_Name
+, o.type_desc
+, i.name AS Index_Name
+, i.type_desc AS Index_Type
+, fill_factor = CASE WHEN i.fill_factor = 0 THEN 100 ELSE i.fill_factor end
+, i.index_id
+, i.object_id
+FROM sys.indexes i
+INNER JOIN sys.objects o ON i.object_id = o.object_id
+INNER JOIN sys.schemas sc ON o.schema_id = sc.schema_id
+WHERE i.name IS NOT NULL
+AND o.type = ''U''
+), CTE_2
+AS
+(
+SELECT
+	a1.Schema_Name as schemaNm,
+    t.[Name] AS TableName,
+	IndexName = A1.Index_Name,
+	a1.fill_factor,
+    p.[rows] AS [RowCount],
+	a.total_pages,
+	a.used_pages,
+	media_linhas_pag = CONVERT(DECIMAL(32,2),CONVERT(DECIMAL(32,2),p.[rows]) / nullif(CONVERT(DECIMAL(32,2),a.used_pages),0)),
+    SUM(a.total_pages) * 8 AS TotalSpaceKB,
+    SUM(a.used_pages) * 8 AS UsedSpaceKB,
+	(SUM(a.total_pages) * 8) - (SUM(a.used_pages)*8) AS UnusedSpaceKB,
+	CONVERT(DECIMAL(32,2),(SUM(a.total_pages) * 8 * CONVERT(DECIMAL(32,2),a1.fill_factor / 100.) )/1024.) AS [Uso Fillfactor 100 MB],
+	isnull(CONVERT(DECIMAL(32,2),(SUM(a.total_pages) * 8 - (SUM(a.total_pages) * 8 * CONVERT(DECIMAL(32,2),a1.fill_factor / 100.) ))/1024.),0) AS [Desperdicio devido ao Fill Factor MB]
+--,CONVERT(DECIMAL(32,2),a1.fill_factor / 100.) 
+FROM CTE A1
+INNER JOIN sys.tables t ON T.object_id = a1.object_id
+INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id AND a1.index_id = i.index_id
+INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+WHERE t.is_ms_shipped = 0 
+    AND i.OBJECT_ID > 255
+	and a1.fill_factor < 98
+GROUP BY t.[Name], p.[Rows],a1.Index_Name, a1.index_id,a1.fill_factor,a.total_pages,a.used_pages,Schema_Name
+--ORDER BY t.[Name]
+)
+insert into #UnusedSpaceByFillfactor
+SELECT db_name(),*
+FROM
+	CTE_2
+'
+
+select
+	DB, convert(decimal(32,2),SUM([Desperdicio devido ao Fill Factor MB])/1024) [Desperdicio GB FillFactor]
+from
+	#UnusedSpaceByFillfactor
+GROUP BY DB
+HAVING SUM([Desperdicio devido ao Fill Factor MB])/1024 > 10
+ORDER BY 2 DESC
+	
+
+select *,
+[APPLY] = 'ALTER INDEX ' + QUOTENAME(IndexName) + ' ON ' + QUOTENAME(DB) + '.' + QUOTENAME (schemaNm) + '.' + QUOTENAME(TableName) + ' REBUILD WITH (FILLFACTOR = 100, ONLINE = ON)',
+[Rollback] = 'ALTER INDEX ' + QUOTENAME(IndexName) + ' ON ' + QUOTENAME(DB) + '.' + QUOTENAME (schemaNm) + '.' + QUOTENAME(TableName) + ' REBUILD WITH (FILLFACTOR = ' + convert(varchar(4),fill_factor) + ', ONLINE = ON)'
+
+from
+	#UnusedSpaceByFillfactor
+WHERE
+	DB IN (
+				select
+					DB
+				from
+					#UnusedSpaceByFillfactor
+				GROUP BY DB
+				HAVING SUM([Desperdicio devido ao Fill Factor MB])/1024 > 10
+				)
+order by [Desperdicio devido ao Fill Factor MB] desc
+ 
+
+
